@@ -599,7 +599,9 @@ def with_fixed_atoms(init_fn, apply_fn, mobile_mask) -> Simulator:
       dof = n_mobile * state.position.shape[1]
       state = state.set(chain=state.chain.set(degrees_of_freedom=dof))
     state = apply_fn(state, *args, **kwargs)
-    return state.set(momentum=state.momentum * mobile)
+    return state.set(
+      momentum=state.momentum * mobile, force=state.force * mobile
+    )
 
   return wrapped_init, wrapped_apply
 

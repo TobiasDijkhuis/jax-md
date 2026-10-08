@@ -14,6 +14,8 @@
 
 """Tests for google3.third_party.py.jax_md.simulate."""
 
+from tests.tpu_test import SPATIAL_DIMENSIONS
+
 import functools
 
 from absl.testing import absltest
@@ -314,7 +316,7 @@ class SimulateTest(test_util.JAXMDTestCase):
         'sy_steps': sy_steps,
         'num_fixed': num_fixed,
       }
-      for dim in [3]
+      for dim in SPATIAL_DIMENSION
       for dtype in DTYPE
       for sy_steps in [1, 3, 5, 7]
       for num_fixed in [
@@ -344,7 +346,7 @@ class SimulateTest(test_util.JAXMDTestCase):
     invariant = partial(simulate.nvt_nose_hoover_invariant, E)
 
     mobile_mask = np.full(PARTICLE_COUNT, True)
-    mobile_mask.at[:num_fixed].set(False)
+    mobile_mask = mobile_mask.at[:num_fixed].set(False)
 
     for _ in range(STOCHASTIC_SAMPLES):
       key, pos_key, vel_key, T_key, masses_key, mobile_key = random.split(

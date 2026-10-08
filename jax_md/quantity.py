@@ -108,7 +108,9 @@ def count_dof(position: Array, mobile_mask: Array | None = None) -> int:
   if mobile_mask is None:
     return tree_reduce(lambda accum, x: accum + x.size, position, 0)
   return tree_reduce(
-    lambda accum, x: accum + x.size, position[mobile_mask, :], 0
+    lambda accum, x: accum + x.size,
+    position,
+    -int(jnp.sum(~mobile_mask) * position.shape[1]),
   )
 
 
