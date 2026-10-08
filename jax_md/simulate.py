@@ -576,13 +576,14 @@ def with_fixed_atoms(init_fn, apply_fn, mobile_mask) -> Simulator:
   fixes Nose-Hoover chain DOF / mass / KE if the state has a ``chain``.
   Not suitable for Langevin (use the integrator's own ``mobile_mask``)."""
   mobile = mobile_mask[:, None].astype(jnp.float32)  # (N, 1)
-  dof = int(3 * jnp.sum(mobile_mask))
+  n_mobile = int(jnp.sum(mobile_mask))
 
   def wrapped_init(key, R, *args, **kwargs):
     state = init_fn(key, R, *args, **kwargs)
     state = state.set(momentum=state.momentum * mobile)
     if hasattr(state, 'chain'):
       KE = kinetic_energy(state)
+      dof = R.shape[1] * n_mobile
       new_mass = state.chain.mass.at[0].multiply(dof / R.size)
       state = state.set(
         chain=state.chain.set(
@@ -595,6 +596,7 @@ def with_fixed_atoms(init_fn, apply_fn, mobile_mask) -> Simulator:
 
   def wrapped_apply(state, *args, **kwargs):
     if hasattr(state, 'chain'):
+      dof = n_mobile * state.position.shape[1]
       state = state.set(chain=state.chain.set(degrees_of_freedom=dof))
     state = apply_fn(state, *args, **kwargs)
     return state.set(momentum=state.momentum * mobile)
