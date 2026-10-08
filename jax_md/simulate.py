@@ -276,24 +276,7 @@ class NVEState:
 
 
 # pylint: disable=invalid-name
-def nve(energy_or_force_fn, shift_fn, dt=1e-3, **sim_kwargs):
-  """Simulates a system in the NVE ensemble.
-
-  Samples from the microcanonical ensemble in which the number of particles
-  (N), the system volume (V), and the energy (E) are held constant. We use a
-  standard velocity Verlet integration scheme.
-
-  Args:
-    energy_or_force: A function that produces either an energy or a force from
-      a set of particle positions specified as an ndarray of shape
-      `[n, spatial_dimension]`.
-    shift_fn: A function that displaces positions, `R`, by an amount `dR`.
-      Both `R` and `dR` should be ndarrays of shape `[n, spatial_dimension]`.
-    dt: Floating point number specifying the timescale (step size) of the
-      simulation.
-  Returns:
-    See above.
-  """
+def _nve(energy_or_force_fn, shift_fn, dt=1e-3, **sim_kwargs):
   force_fn = quantity.canonicalize_force(energy_or_force_fn)
 
   @jit
@@ -562,7 +545,64 @@ class NVTNoseHooverState:
     return self.momentum / self.mass
 
 
-def nvt_nose_hoover(
+def with_fixed_atoms(init_fn, apply_fn, mobile_mask) -> Simulator:
+  """Wrap NVE / Nose-Hoover NVT to constrain fixed atoms. Masks momenta;
+  fixes Nose-Hoover chain DOF / mass / KE if the state has a ``chain``.
+  Not suitable for Langevin (use the integrator's own ``mobile_mask``)."""
+  mobile = mobile_mask[:, None].astype(jnp.float32)  # (N, 1)
+  dof = int(3 * jnp.sum(mobile_mask))
+
+  def wrapped_init(key, R, *args, **kwargs):
+    state = init_fn(key, R, *args, **kwargs)
+    state = state.set(momentum=state.momentum * mobile)
+    if hasattr(state, 'chain'):
+      KE = kinetic_energy(state)
+      new_mass = state.chain.mass.at[0].multiply(dof / R.size)
+      state = state.set(
+        chain=state.chain.set(
+          degrees_of_freedom=dof,
+          kinetic_energy=KE,
+          mass=new_mass,
+        )
+      )
+    return state
+
+  def wrapped_apply(state, *args, **kwargs):
+    if hasattr(state, 'chain'):
+      state = state.set(chain=state.chain.set(degrees_of_freedom=dof))
+    state = apply_fn(state, *args, **kwargs)
+    return state.set(momentum=state.momentum * mobile)
+
+  return wrapped_init, wrapped_apply
+
+
+def nve(energy_or_force_fn, shift_fn, dt=1e-3, mobile_mask=None, **kwargs):
+  """Simulates a system in the NVE ensemble.
+
+  Samples from the microcanonical ensemble in which the number of particles
+  (N), the system volume (V), and the energy (E) are held constant. We use a
+  standard velocity Verlet integration scheme.
+
+  Args:
+    energy_or_force: A function that produces either an energy or a force from
+      a set of particle positions specified as an ndarray of shape
+      `[n, spatial_dimension]`.
+    shift_fn: A function that displaces positions, `R`, by an amount `dR`.
+      Both `R` and `dR` should be ndarrays of shape `[n, spatial_dimension]`.
+    dt: Floating point number specifying the timescale (step size) of the
+      simulation.
+    mobile_mask: Mask indicating which particles are moving. If None,
+      all particles are mobile.
+  Returns:
+    See above.
+  """
+  init_fn, apply_fn = _nve(energy_or_force_fn, shift_fn, dt=dt, **kwargs)
+  if mobile_mask is None:
+    return init_fn, apply_fn
+  return with_fixed_atoms(init_fn, apply_fn, mobile_mask)
+
+
+def _nvt_nose_hoover(
   energy_or_force_fn: Callable[..., Array],
   shift_fn: ShiftFn,
   dt: float,
@@ -573,51 +613,6 @@ def nvt_nose_hoover(
   tau: float | None = None,
   **sim_kwargs,
 ) -> Simulator:
-  """Simulation in the NVT ensemble using a Nose Hoover Chain thermostat.
-
-  Samples from the canonical ensemble in which the number of particles (N),
-  the system volume (V), and the temperature (T) are held constant. We use a
-  Nose Hoover Chain (NHC) thermostat described in [#martyna92]_ [#martyna98]_
-  [#tuckerman]_. We follow the direct translation method outlined in
-  Tuckerman et al. [#tuckerman]_ and the interested reader might want to look
-  at that paper as a reference.
-
-  Args:
-    energy_or_force: A function that produces either an energy or a force from
-      a set of particle positions specified as an ndarray of shape
-      `[n, spatial_dimension]`.
-    shift_fn: A function that displaces positions, `R`, by an amount `dR`.
-      Both `R` and `dR` should be ndarrays of shape `[n, spatial_dimension]`.
-    dt: Floating point number specifying the timescale (step size) of the
-      simulation.
-    kT: Floating point number specifying the temperature in units of Boltzmann
-      constant. To update the temperature dynamically during a simulation one
-      should pass `kT` as a keyword argument to the step function.
-    chain_length: An integer specifying the number of particles in
-      the Nose-Hoover chain.
-    chain_steps: An integer specifying the number, :math:`n_c`, of outer
-      substeps.
-    sy_steps: An integer specifying the number of Suzuki-Yoshida steps. This
-      must be either `1`, `3`, `5`, or `7`.
-    tau: A floating point timescale over which temperature equilibration
-      occurs. Measured in units of `dt`. The performance of the Nose-Hoover
-      chain thermostat can be quite sensitive to this choice.
-  Returns:
-    See above.
-
-  .. rubric:: References
-  .. [#martyna92] Martyna, Glenn J., Michael L. Klein, and Mark Tuckerman.
-    "Nose-Hoover chains: The canonical ensemble via continuous dynamics."
-    The Journal of chemical physics 97, no. 4 (1992): 2635-2643.
-  .. [#martyna98] Martyna, Glenn, Mark Tuckerman, Douglas J. Tobias, and Michael L. Klein.
-    "Explicit reversible integrators for extended systems dynamics."
-    Molecular Physics 87. (1998) 1117-1157.
-  .. [#tuckerman] Tuckerman, Mark E., Jose Alejandre, Roberto Lopez-Rendon,
-    Andrea L. Jochim, and Glenn J. Martyna.
-    "A Liouville-operator derived measure-preserving integrator for molecular
-    dynamics simulations in the isothermal-isobaric ensemble."
-    Journal of Physics A: Mathematical and General 39, no. 19 (2006): 5629.
-  """
   force_fn = quantity.canonicalize_force(energy_or_force_fn)
   dt = f32(dt)
   dt_2 = f32(dt / 2)
@@ -669,6 +664,81 @@ def nvt_nose_hoover(
   return init_fn, apply_fn
 
 
+def nvt_nose_hoover(
+  energy_or_force_fn: Callable[..., Array],
+  shift_fn: ShiftFn,
+  dt: float,
+  kT: ArrayLike,
+  chain_length: int = 5,
+  chain_steps: int = 2,
+  sy_steps: int = 3,
+  tau: float | None = None,
+  mobile_mask: Array | None = None,
+  **sim_kwargs,
+):
+  """Simulation in the NVT ensemble using a Nose Hoover Chain thermostat.
+
+  Samples from the canonical ensemble in which the number of particles (N),
+  the system volume (V), and the temperature (T) are held constant. We use a
+  Nose Hoover Chain (NHC) thermostat described in [#martyna92]_ [#martyna98]_
+  [#tuckerman]_. We follow the direct translation method outlined in
+  Tuckerman et al. [#tuckerman]_ and the interested reader might want to look
+  at that paper as a reference.
+
+  Args:
+    energy_or_force: A function that produces either an energy or a force from
+      a set of particle positions specified as an ndarray of shape
+      `[n, spatial_dimension]`.
+    shift_fn: A function that displaces positions, `R`, by an amount `dR`.
+      Both `R` and `dR` should be ndarrays of shape `[n, spatial_dimension]`.
+    dt: Floating point number specifying the timescale (step size) of the
+      simulation.
+    kT: Floating point number specifying the temperature in units of Boltzmann
+      constant. To update the temperature dynamically during a simulation one
+      should pass `kT` as a keyword argument to the step function.
+    chain_length: An integer specifying the number of particles in
+      the Nose-Hoover chain.
+    chain_steps: An integer specifying the number, :math:`n_c`, of outer
+      substeps.
+    sy_steps: An integer specifying the number of Suzuki-Yoshida steps. This
+      must be either `1`, `3`, `5`, or `7`.
+    tau: A floating point timescale over which temperature equilibration
+      occurs. Measured in units of `dt`. The performance of the Nose-Hoover
+      chain thermostat can be quite sensitive to this choice.
+    mobile_mask: Mask indicating which particles are moving. If None,
+      all particles are mobile.
+  Returns:
+    See above.
+
+  .. rubric:: References
+  .. [#martyna92] Martyna, Glenn J., Michael L. Klein, and Mark Tuckerman.
+    "Nose-Hoover chains: The canonical ensemble via continuous dynamics."
+    The Journal of chemical physics 97, no. 4 (1992): 2635-2643.
+  .. [#martyna98] Martyna, Glenn, Mark Tuckerman, Douglas J. Tobias, and Michael L. Klein.
+    "Explicit reversible integrators for extended systems dynamics."
+    Molecular Physics 87. (1998) 1117-1157.
+  .. [#tuckerman] Tuckerman, Mark E., Jose Alejandre, Roberto Lopez-Rendon,
+    Andrea L. Jochim, and Glenn J. Martyna.
+    "A Liouville-operator derived measure-preserving integrator for molecular
+    dynamics simulations in the isothermal-isobaric ensemble."
+    Journal of Physics A: Mathematical and General 39, no. 19 (2006): 5629.
+  """
+  init_fn, apply_fn = _nvt_nose_hoover(
+    energy_or_force_fn,
+    shift_fn,
+    dt,
+    kT,
+    tau=tau,
+    chain_length=chain_length,
+    chain_steps=chain_steps,
+    sy_steps=sy_steps,
+    **sim_kwargs,
+  )
+  if mobile_mask is None:
+    return init_fn, apply_fn
+  return with_fixed_atoms(init_fn, apply_fn, mobile_mask)
+
+
 def nvt_nose_hoover_invariant(
   energy_fn: Callable[..., Array],
   state: NVTNoseHooverState,
@@ -690,7 +760,7 @@ def nvt_nose_hoover_invariant(
   PE = energy_fn(state.position, **kwargs)
   KE = kinetic_energy(state)
 
-  DOF = quantity.count_dof(state.position)
+  DOF = state.chain.degrees_of_freedom
   E = PE + KE
 
   c = state.chain
